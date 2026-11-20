@@ -1,0 +1,10 @@
+*.iml
+.gradle/
+local.properties
+.idea/
+build/
+app/build/
+.DS_Store
+
+# VPN core binary: fetched + checksum-verified (scripts/fetch_core.sh), not committed
+app/libs/*.aar
