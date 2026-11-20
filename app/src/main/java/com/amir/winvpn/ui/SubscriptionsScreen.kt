@@ -1,13 +1,23 @@
 package com.amir.winvpn.ui
 
-import androidx.compose.foundation.layout.*
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.material3.Button
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-
-import com.amir.winvpn.ui.theme.WinColors
+import kotlinx.coroutines.launch
 
 @Composable
 fun SubscriptionsScreen(
@@ -32,97 +42,82 @@ fun SubscriptionsScreen(
         title = "Subscriptions",
         onBack = onBack
     ) {
-
-        OutlinedTextField(
-            value = url,
-            onValueChange = {
-                url = it
-                message = null
-            },
-            label = {
-                Text("Subscription URL")
-            },
-            placeholder = {
-                Text("https://example.com/subscription")
-            },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth()
-        )
-
-        Spacer(
-            modifier = Modifier.height(12.dp)
-        )
-
-        Button(
-            onClick = {
-                loading = true
-                message = null
-
-                scope.launch {
-                    val result = vm.importSubscription(url)
-
-                    loading = false
-
-                    message = result.fold(
-                        onSuccess = { (imported, failed) ->
-                            buildString {
-                                append("Imported ")
-                                append(imported)
-                                append(" configs")
-
-                                if (failed > 0) {
-                                    append("; skipped ")
-                                    append(failed)
-                                    append(" invalid lines")
-                                }
-
-                                append(".")
-                            }
-                        },
-                        onFailure = {
-                            it.message
-                                ?: "Subscription update failed"
-                        }
-                    )
-                }
-            },
-            enabled = url.isNotBlank() && !loading,
+        Column(
+            verticalArrangement = Arrangement.spacedBy(12.dp),
             modifier = Modifier.fillMaxWidth()
         ) {
-            Text(
-                if (loading) {
-                    "Updating…"
-                } else {
-                    "Update Subscription"
-                }
+
+            OutlinedTextField(
+                value = url,
+                onValueChange = {
+                    url = it
+                    message = null
+                },
+                label = {
+                    Text("Subscription URL")
+                },
+                placeholder = {
+                    Text("https://example.com/subscription")
+                },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth()
             )
-        }
 
-        Spacer(
-            modifier = Modifier.height(12.dp)
-        )
+            Button(
+                onClick = {
+                    loading = true
+                    message = null
 
-        message?.let { text ->
-            Text(
-                text = text,
-                color = if (
-                    text.startsWith("Imported")
-                ) {
-                    WinColors.Connected
-                } else {
-                    WinColors.Error
-                }
+                    scope.launch {
+                        val result = vm.importSubscription(url)
+
+                        loading = false
+
+                        message = result.fold(
+                            onSuccess = { pair ->
+                                val imported = pair.first
+                                val failed = pair.second
+
+                                buildString {
+                                    append("Imported ")
+                                    append(imported)
+                                    append(" configs")
+
+                                    if (failed > 0) {
+                                        append("; skipped ")
+                                        append(failed)
+                                        append(" invalid lines")
+                                    }
+
+                                    append(".")
+                                }
+                            },
+                            onFailure = { error ->
+                                error.message
+                                    ?: "Subscription update failed"
+                            }
+                        )
+                    }
+                },
+                enabled = url.isNotBlank() && !loading,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Text(
+                    if (loading) {
+                        "Updating..."
+                    } else {
+                        "Update Subscription"
+                    }
+                )
+            }
+
+            Spacer(
+                modifier = Modifier.height(4.dp)
             )
+
+            message?.let {
+                Text(it)
+            }
         }
-
-        Spacer(
-            modifier = Modifier.height(12.dp)
-        )
-
-        Text(
-            text = "Supports plain-text and Base64 subscriptions containing " +
-                "VLESS, VMess, Trojan, Shadowsocks, SOCKS5 and HTTP links.",
-            color = WinColors.TextSecondary
-        )
     }
 }
