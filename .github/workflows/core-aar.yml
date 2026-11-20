@@ -1,0 +1,38 @@
+name: Core AAR
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Prepare scripts
+        shell: bash
+        run: |
+          chmod +x ./scripts/*.sh
+          ls -l ./scripts/
+
+      - name: Fetch Core
+        shell: bash
+        run: bash ./scripts/fetch_core.sh
+
+      - name: Check AAR
+        shell: bash
+        run: |
+          test -f app/libs/libv2ray.aar
+          ls -lh app/libs/libv2ray.aar
+
+      - name: Upload Core AAR
+        uses: actions/upload-artifact@v4
+        with:
+          name: libv2ray-aar
+          path: app/libs/libv2ray.aar
+          if-no-files-found: error
