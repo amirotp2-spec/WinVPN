@@ -5,7 +5,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
@@ -42,8 +41,7 @@ import kotlin.coroutines.coroutineContext
  *
  * VpnService.Builder -> TUN fd -> Xray core -> proxy server
  *
- * CONNECTED is only published after a probe request has succeeded
- * through the proxy outbound.
+ * CONNECTED is only published after the core has started successfully.
  */
 class WinVpnService : VpnService() {
 
@@ -110,7 +108,10 @@ class WinVpnService : VpnService() {
          * must enter foreground promptly.
          */
         if (!startForegroundSafely(notification("Connecting…"))) {
-            VpnStateHolder.set(VpnState.ERROR, VpnError.CONNECTION_FAILED)
+            VpnStateHolder.set(
+                VpnState.ERROR,
+                VpnError.CONNECTION_FAILED
+            )
             stopSelf()
             return
         }
@@ -205,9 +206,20 @@ class WinVpnService : VpnService() {
                         settings = appSettings
                     )
 
-                } catch (
-                    e: Exception
-                ) {
+                } catch (e: Throwable) {
+
+                    val detail = buildErrorDetail(
+                        "Xray config build failed",
+                        e
+                    )
+
+                    Log.e(
+                        TAG,
+                        detail,
+                        e
+                    )
+
+                    showDiagnosticNotification(detail)
 
                     return fail(
                         VpnError.UNSUPPORTED_CONFIG
@@ -219,7 +231,10 @@ class WinVpnService : VpnService() {
             )
 
             val tun =
-                buildTunnel(config, appSettings)
+                buildTunnel(
+                    config,
+                    appSettings
+                )
                     ?: return fail(
                         VpnError.PERMISSION_DENIED
                     )
@@ -237,6 +252,10 @@ class WinVpnService : VpnService() {
 
             engine = eng
 
+            // ----------------------------------------------------------
+            // Xray Core START
+            // ----------------------------------------------------------
+
             try {
 
                 eng.start(
@@ -244,9 +263,30 @@ class WinVpnService : VpnService() {
                     tun.fd
                 )
 
-            } catch (
-                e: Exception
-            ) {
+            } catch (e: Throwable) {
+
+                val detail = buildErrorDetail(
+                    "Core start failed",
+                    e
+                )
+
+                /*
+                 * Write the COMPLETE exception to Logcat.
+                 */
+                Log.e(
+                    TAG,
+                    detail,
+                    e
+                )
+
+                /*
+                 * Show the COMPLETE Core error in a separate
+                 * diagnostic notification.
+                 *
+                 * This notification uses a different ID, so
+                 * stopForegroundCompat() will not remove it.
+                 */
+                showDiagnosticNotification(detail)
 
                 return fail(
                     VpnError.CORE_FAILED
@@ -255,11 +295,15 @@ class WinVpnService : VpnService() {
 
             coroutineContext.ensureActive()
 
-            // The core being alive is the authoritative connection state.
-            // A remote HTTP probe is best-effort only; captive portals, DNS policy,
-            // or a temporarily blocked probe endpoint must not turn a working VPN
-            // into a false ERROR/RETRY state.
-            runCatching { verify(eng) }
+            /*
+             * The core being alive is the authoritative
+             * connection state.
+             *
+             * The remote HTTP probe is best-effort only.
+             */
+            runCatching {
+                verify(eng)
+            }
 
             coroutineContext.ensureActive()
 
@@ -285,13 +329,116 @@ class WinVpnService : VpnService() {
             e: Throwable
         ) {
 
-            Log.w(
-                TAG,
-                "connect failed: ${e.javaClass.simpleName}"
+            val detail = buildErrorDetail(
+                "Connection failed",
+                e
             )
+
+            Log.e(
+                TAG,
+                detail,
+                e
+            )
+
+            showDiagnosticNotification(detail)
 
             fail(
                 VpnError.CONNECTION_FAILED
+            )
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // ERROR DETAIL
+    // ------------------------------------------------------------------
+
+    /**
+     * Builds a useful diagnostic message from the complete exception
+     * chain instead of exposing only the exception class name.
+     */
+    private fun buildErrorDetail(
+        prefix: String,
+        error: Throwable
+    ): String {
+
+        val parts = mutableListOf<String>()
+
+        var current: Throwable? = error
+        var depth = 0
+
+        while (
+            current != null &&
+            depth < 5
+        ) {
+
+            val message =
+                current.message
+                    ?.trim()
+                    ?.takeIf {
+                        it.isNotEmpty()
+                    }
+
+            val text =
+                if (message != null) {
+                    "${current.javaClass.simpleName}: $message"
+                } else {
+                    current.javaClass.simpleName
+                }
+
+            if (
+                parts.isEmpty() ||
+                parts.last() != text
+            ) {
+                parts.add(text)
+            }
+
+            current = current.cause
+            depth++
+        }
+
+        return buildString {
+
+            append(prefix)
+
+            if (parts.isNotEmpty()) {
+                append("\n")
+                append(
+                    parts.joinToString(
+                        "\nCaused by: "
+                    )
+                )
+            }
+        }
+    }
+
+    /**
+     * Diagnostic notification that survives removal of the
+     * foreground VPN notification.
+     */
+    private fun showDiagnosticNotification(
+        detail: String
+    ) {
+
+        try {
+
+            val nm =
+                getSystemService(
+                    NotificationManager::class.java
+                )
+
+            nm.notify(
+                DIAGNOSTIC_NOTIFICATION_ID,
+                notification(
+                    detail
+                )
+            )
+
+        } catch (e: Throwable) {
+
+            Log.e(
+                TAG,
+                "Unable to show diagnostic notification",
+                e
             )
         }
     }
@@ -302,7 +449,8 @@ class WinVpnService : VpnService() {
 
     private fun buildTunnel(
         config: VpnConfig,
-        settings: com.amir.winvpn.data.AppSettings = com.amir.winvpn.data.AppSettings()
+        settings: com.amir.winvpn.data.AppSettings =
+            com.amir.winvpn.data.AppSettings()
     ): ParcelFileDescriptor? {
 
         val configureIntent =
@@ -318,17 +466,7 @@ class WinVpnService : VpnService() {
             )
 
         /*
-         * IMPORTANT:
-         *
          * VpnService.Builder is an inner class of VpnService.
-         *
-         * It must be constructed with the current
-         * WinVpnService instance.
-         *
-         * This fixes the Kotlin compiler error:
-         *
-         * "Constructor of the inner class 'Builder' can only
-         * be called with a receiver of the containing class."
          */
         val builder =
             this@WinVpnService.Builder()
@@ -349,32 +487,75 @@ class WinVpnService : VpnService() {
                     0
                 )
                 .addDnsServer(
-                    settings.vpnDns.ifBlank { "1.1.1.1" }
+                    settings.vpnDns.ifBlank {
+                        "1.1.1.1"
+                    }
                 )
                 .setConfigureIntent(
                     configureIntent
                 )
 
         if (settings.enableIpv6) {
-            builder.addAddress("fd00:10:10:14::1", 126)
-            builder.addRoute("::", 0)
+
+            builder.addAddress(
+                "fd00:10:10:14::1",
+                126
+            )
+
+            builder.addRoute(
+                "::",
+                0
+            )
         }
 
         if (settings.allowLan) {
-            builder.addRoute("10.0.0.0", 8)
-            builder.addRoute("172.16.0.0", 12)
-            builder.addRoute("192.168.0.0", 16)
+
+            builder.addRoute(
+                "10.0.0.0",
+                8
+            )
+
+            builder.addRoute(
+                "172.16.0.0",
+                12
+            )
+
+            builder.addRoute(
+                "192.168.0.0",
+                16
+            )
         }
 
         if (settings.allowedApps.isNotEmpty()) {
+
             settings.allowedApps.forEach { pkg ->
-                runCatching { builder.addAllowedApplication(pkg) }
+
+                runCatching {
+                    builder.addAllowedApplication(
+                        pkg
+                    )
+                }
             }
+
         } else {
-            // Keep the VPN core process outside its own TUN to prevent a routing loop.
-            runCatching { builder.addDisallowedApplication(packageName) }
+
+            /*
+             * Keep the VPN core process outside its own TUN
+             * to prevent a routing loop.
+             */
+            runCatching {
+                builder.addDisallowedApplication(
+                    packageName
+                )
+            }
+
             settings.bypassApps.forEach { pkg ->
-                runCatching { builder.addDisallowedApplication(pkg) }
+
+                runCatching {
+                    builder.addDisallowedApplication(
+                        pkg
+                    )
+                }
             }
         }
 
@@ -389,10 +570,6 @@ class WinVpnService : VpnService() {
     // VERIFY CONNECTION
     // ------------------------------------------------------------------
 
-    /**
-     * Returns null when traffic really flows through
-     * the proxy, otherwise returns the appropriate error.
-     */
     private suspend fun verify(
         eng: CoreEngine
     ): VpnError? {
@@ -413,10 +590,6 @@ class WinVpnService : VpnService() {
                 return VpnError.CONNECTION_TIMEOUT
             }
 
-            /*
-             * Run the native probe in the service scope
-             * so user cancellation does not get blocked.
-             */
             val probe =
                 scope.async {
 
@@ -443,6 +616,7 @@ class WinVpnService : VpnService() {
                 attempt <
                 VERIFY_ATTEMPTS - 1
             ) {
+
                 delay(500)
             }
         }
@@ -468,10 +642,6 @@ class WinVpnService : VpnService() {
 
         if (!wasActive) {
 
-            /*
-             * Nothing to stop, or disconnect is
-             * already in progress.
-             */
             if (
                 VpnStateHolder.state.value !=
                 VpnState.DISCONNECTING
@@ -535,6 +705,7 @@ class WinVpnService : VpnService() {
             )
 
         if (!applied) {
+
             /*
              * User disconnect is already handling cleanup.
              */
@@ -552,10 +723,6 @@ class WinVpnService : VpnService() {
     // CORE CALLBACK
     // ------------------------------------------------------------------
 
-    /**
-     * Core stopped on its own while we did not
-     * explicitly ask it to stop.
-     */
     private fun onCoreStopped() {
 
         if (stoppingByUs.get()) {
@@ -567,6 +734,18 @@ class WinVpnService : VpnService() {
             VpnState.CONNECTED
         ) {
 
+            val detail =
+                "Xray Core stopped unexpectedly"
+
+            Log.e(
+                TAG,
+                detail
+            )
+
+            showDiagnosticNotification(
+                detail
+            )
+
             fail(
                 VpnError.CONNECTION_FAILED
             )
@@ -577,18 +756,13 @@ class WinVpnService : VpnService() {
     // TEARDOWN
     // ------------------------------------------------------------------
 
-    /**
-     * Idempotent:
-     *
-     * 1. Stop Xray
-     * 2. Close TUN
-     */
     @Synchronized
     private fun teardown() {
 
         stoppingByUs.set(true)
 
         engine?.let {
+
             runCatching {
                 it.stop()
             }
@@ -597,6 +771,7 @@ class WinVpnService : VpnService() {
         engine = null
 
         tunnel?.let {
+
             runCatching {
                 it.close()
             }
@@ -609,10 +784,6 @@ class WinVpnService : VpnService() {
     // VPN REVOKED
     // ------------------------------------------------------------------
 
-    /**
-     * Called when VPN permission is revoked or
-     * another VPN app takes over.
-     */
     override fun onRevoke() {
 
         scope.launch {
@@ -687,6 +858,10 @@ class WinVpnService : VpnService() {
             .setContentTitle(
                 "Win VPN"
             )
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(text)
+            )
             .setContentText(
                 text
             )
@@ -725,20 +900,36 @@ class WinVpnService : VpnService() {
     private fun startForegroundSafely(
         n: Notification
     ): Boolean {
+
         return try {
+
             if (Build.VERSION.SDK_INT >= 34) {
+
                 ServiceCompat.startForeground(
                     this,
                     NOTIFICATION_ID,
                     n,
                     ServiceInfo.FOREGROUND_SERVICE_TYPE_SYSTEM_EXEMPTED
                 )
+
             } else {
-                startForeground(NOTIFICATION_ID, n)
+
+                startForeground(
+                    NOTIFICATION_ID,
+                    n
+                )
             }
+
             true
-        } catch (e: Exception) {
-            Log.w(TAG, "startForeground failed: ${e.javaClass.simpleName}")
+
+        } catch (e: Throwable) {
+
+            Log.e(
+                TAG,
+                "startForeground failed",
+                e
+            )
+
             false
         }
     }
@@ -777,6 +968,13 @@ class WinVpnService : VpnService() {
 
         private const val NOTIFICATION_ID =
             1
+
+        /*
+         * Separate notification ID so the diagnostic error
+         * survives stopForegroundCompat().
+         */
+        private const val DIAGNOSTIC_NOTIFICATION_ID =
+            1002
 
         private const val MTU =
             1500
